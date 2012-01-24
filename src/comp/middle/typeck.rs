@@ -980,7 +980,7 @@ mod writeback {
         resolve_type_vars_for_node(wbcx, e.span, e.id);
         alt e.node {
           ast::expr_fn(_, decl, _, _) |
-          ast::expr_fn_block(decl, _) {
+          ast::expr_fn_sugared(_, decl, _) {
             for input in decl.inputs {
                 resolve_type_vars_for_node(wbcx, e.span, input.id);
             }
@@ -1614,7 +1614,7 @@ fn check_expr_with_unifier(fcx: @fn_ctxt, expr: @ast::expr, unify: unifier,
                 alt a_opt {
                   some(a) {
                     let is_block = alt a.node {
-                      ast::expr_fn_block(_, _) { true }
+                      ast::expr_fn_sugared(_, _, _) { true }
                       _ { false }
                     };
                     if is_block == check_blocks {
@@ -2009,13 +2009,15 @@ fn check_expr_with_unifier(fcx: @fn_ctxt, expr: @ast::expr, unify: unifier,
                                    unify, expected);
         capture::check_capture_clause(tcx, expr.id, proto, *captures);
       }
-      ast::expr_fn_block(decl, body) {
+      ast::expr_fn_sugared(sk, decl, body) {
         // Take the prototype from the expected type, but default to block:
-        let proto = alt ty::struct(tcx, expected) {
-          ty::ty_fn({proto, _}) { proto }
-          _ {
-            tcx.sess.span_warn(expr.span, "unable to infer kind of closure, \
-                                           defaulting to block");
+        let proto = alt (sk, ty::struct(tcx, expected)) {
+          (_, ty::ty_fn({proto, _})) { proto }
+          (ast::sk_bind, _) { ast::proto_box }
+          (ast::sk_closure, _) {
+            fcx.ccx.tcx.sess.span_warn(
+                expr.span,
+                "unable to infer kind of closure, defaulting to block");
             ast::proto_block
           }
         };
@@ -2035,53 +2037,6 @@ fn check_expr_with_unifier(fcx: @fn_ctxt, expr: @ast::expr, unify: unifier,
               none { ty::mk_nil(tcx) }
             };
         write_ty(tcx, id, typ);
-      }
-      ast::expr_bind(f, args) {
-        // Call the generic checker.
-        bot = check_expr(fcx, f);
-        bot |= check_call_or_bind(fcx, expr.span, expr_ty(tcx, f), args);
-
-        // Pull the argument and return types out.
-        let proto, arg_tys, rt, cf, constrs;
-        alt structure_of(fcx, expr.span, expr_ty(tcx, f)) {
-          // FIXME:
-          // probably need to munge the constrs to drop constraints
-          // for any bound args
-          ty::ty_fn(f) {
-            proto = f.proto;
-            arg_tys = f.inputs;
-            rt = f.output;
-            cf = f.ret_style;
-            constrs = f.constraints;
-          }
-          _ { fail "LHS of bind expr didn't have a function type?!"; }
-        }
-
-        // For each blank argument, add the type of that argument
-        // to the resulting function type.
-        let out_args = [];
-        let i = 0u;
-        while i < vec::len(args) {
-            alt args[i] {
-              some(_) {/* no-op */ }
-              none { out_args += [arg_tys[i]]; }
-            }
-            i += 1u;
-        }
-
-        // Determine what fn prototype results from binding
-        fn lower_bound_proto(proto: ast::proto) -> ast::proto {
-            // FIXME: This is right for bare fns, possibly not others
-            alt proto {
-              ast::proto_bare { ast::proto_box }
-              _ { proto }
-            }
-        }
-
-        let ft = ty::mk_fn(tcx, {proto: lower_bound_proto(proto),
-                                 inputs: out_args, output: rt,
-                                 ret_style: cf, constraints: constrs});
-        write_ty(tcx, id, ft);
       }
       ast::expr_call(f, args, _) {
         bot = check_call_full(fcx, expr.span, f, args, expr.id);
@@ -2290,7 +2245,8 @@ fn check_expr_with_unifier(fcx: @fn_ctxt, expr: @ast::expr, unify: unifier,
           }
         }
       }
-      _ { tcx.sess.unimpl("expr type in typeck::check_expr"); }
+      _ { tcx.sess.unimpl(#fmt("expr type in typeck::check_expr: %s",
+                               expr_to_str(expr))); }
     }
     if bot { write_ty(tcx, expr.id, ty::mk_bot(tcx)); }
 
